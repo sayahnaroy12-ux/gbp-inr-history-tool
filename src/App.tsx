@@ -17,6 +17,7 @@ import Suppliers from './pages/Suppliers';
 import Alerts from './pages/Alerts';
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
+import ExchangeRates from './pages/ExchangeRates';
 
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { isAuthenticated } = useSupplyChain();
@@ -27,10 +28,11 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
 export default function App() {
   return (
     <SupplyChainProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={import.meta.env.BASE_URL}>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/gbp-inr" element={<ExchangeRates />} />
           <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
@@ -39,6 +41,7 @@ export default function App() {
             <Route path="inventory" element={<Inventory />} />
             <Route path="suppliers" element={<Suppliers />} />
             <Route path="alerts" element={<Alerts />} />
+            <Route path="exchange-rates" element={<ExchangeRates />} />
             <Route path="settings" element={<Settings />} />
             <Route path="profile" element={<Profile />} />
           </Route>

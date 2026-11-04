@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Map, Package, Users, MapPin, Bell, Settings } from 'lucide-react';
+import { LayoutDashboard, Map, Package, Users, MapPin, Bell, Settings, ChartNoAxesCombined } from 'lucide-react';
 import { useSupplyChain } from '../store/SupplyChainContext';
 
 const navItems = [
@@ -9,6 +9,7 @@ const navItems = [
   { name: 'Suppliers', path: '/suppliers', icon: Users },
   { name: 'Location Manager', path: '/locations', icon: MapPin },
   { name: 'Alerts', path: '/alerts', icon: Bell },
+  { name: 'FX History', path: '/exchange-rates', icon: ChartNoAxesCombined },
   { name: 'Settings', path: '/settings', icon: Settings },
 ];
 
