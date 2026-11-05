@@ -60,9 +60,11 @@ type NewsFeedResponse = {
   }[];
 };
 
-type RangeKey = '30D' | '90D' | '1Y' | '5Y' | 'ALL';
+type RangeKey = '1D' | '5D' | '30D' | '90D' | '1Y' | '5Y' | 'ALL';
 
 const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
+  { key: '1D', label: '1D' },
+  { key: '5D', label: '5D' },
   { key: '30D', label: '30D' },
   { key: '90D', label: '90D' },
   { key: '1Y', label: '1Y' },
@@ -193,6 +195,7 @@ function parseNews(payload: NewsFeedResponse): NewsItem[] {
 }
 
 function getRangeStart(range: RangeKey, latestDate: string): string | null {
+  if (range === '1D' || range === '5D') return null;
   if (range === 'ALL') return null;
   const days = range === '30D' ? 30 : range === '90D' ? 90 : range === '1Y' ? 365 : 365 * 5;
   const start = new Date(`${latestDate}T00:00:00Z`);
@@ -555,11 +558,13 @@ export default function ExchangeRates() {
   const previous = rates[rates.length - 2];
   const selectedRates = useMemo(() => {
     if (!latest) return [];
+    if (range === '1D') return rates.slice(-2);
+    if (range === '5D') return rates.slice(-5);
     const startDate = getRangeStart(range, latest.date);
     return startDate ? rates.filter(({ date }) => date >= startDate) : rates;
   }, [latest, range, rates]);
   const trendRates = useMemo(
-    () => range === '30D' || range === '90D' ? selectedRates : getMonthlyAverages(selectedRates),
+    () => ['1D', '5D', '30D', '90D'].includes(range) ? selectedRates : getMonthlyAverages(selectedRates),
     [range, selectedRates],
   );
   const yearlyTimelines = useMemo(() => {
@@ -716,7 +721,13 @@ export default function ExchangeRates() {
           <div>
             <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Rate trend</h2>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              {range === '30D' || range === '90D' ? 'Daily reference rates' : 'Monthly average of available daily rates'}
+              {range === '1D'
+                ? 'Latest daily change vs previous available rate'
+                : range === '5D'
+                  ? 'Latest 5 published business-day rates'
+                  : range === '30D' || range === '90D'
+                    ? 'Daily reference rates'
+                    : 'Monthly average of available daily rates'}
             </p>
           </div>
           <div className="flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800" aria-label="Rate trend range">
@@ -770,7 +781,7 @@ export default function ExchangeRates() {
                 />
                 <Tooltip
                   labelFormatter={value => value.length === 7 ? formatDate(`${value}-01`, { month: 'long', year: 'numeric' }) : formatDate(String(value))}
-                  formatter={(value) => [formatRate(Number(value)), range === '30D' || range === '90D' ? 'Reference rate' : 'Monthly average']}
+                  formatter={(value) => [formatRate(Number(value)), ['1D', '5D', '30D', '90D'].includes(range) ? 'Reference rate' : 'Monthly average']}
                   contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgb(15 23 42 / 0.1)' }}
                 />
                 <Area type="monotone" dataKey="rate" stroke="#2563eb" strokeWidth={2} fill="url(#gbpInrFill)" />
