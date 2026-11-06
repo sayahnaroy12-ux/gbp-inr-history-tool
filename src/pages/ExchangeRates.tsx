@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowDownRight, ArrowUpRight, RefreshCw, TrendingUp } from 'lucide-react';
 import {
   Area,
@@ -452,6 +452,68 @@ function DailyChange({ change, percent }: { change: number; percent: number }) {
   );
 }
 
+function LiveMarketChart() {
+  const widgetRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const widget = widgetRef.current;
+    if (!widget) return;
+
+    const script = document.createElement('script');
+    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+    script.async = true;
+    script.text = JSON.stringify({
+      allow_symbol_change: false,
+      autosize: true,
+      calendar: false,
+      details: true,
+      hide_side_toolbar: true,
+      interval: '5',
+      locale: 'en',
+      save_image: false,
+      style: '1',
+      support_host: 'https://www.tradingview.com',
+      symbol: 'FX_IDC:GBPINR',
+      theme: 'light',
+      timezone: 'Asia/Kolkata',
+      withdateranges: true,
+    });
+    widget.appendChild(script);
+
+    return () => {
+      widget.replaceChildren();
+    };
+  }, []);
+
+  return (
+    <section aria-label="Live GBP/INR market chart" className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+      <div className="mb-4">
+        <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Live market rate &amp; intraday chart</h2>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          Current GBP/INR market feed with a 5-minute chart. Quote availability and update timing depend on the data provider; prices may be delayed or indicative, not executable.
+        </p>
+      </div>
+      <div className="h-[460px] overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700">
+        <div className="tradingview-widget-container h-full w-full" ref={widgetRef}>
+          <div className="tradingview-widget-container__widget h-full w-full" />
+        </div>
+      </div>
+      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+        Intraday data by{' '}
+        <a
+          href="https://www.tradingview.com/symbols/GBPINR/"
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-blue-600 underline underline-offset-2 hover:text-blue-700 dark:text-blue-400"
+        >
+          TradingView (FX_IDC:GBPINR)
+        </a>
+        . The daily history, year timelines, and forecasts below continue to use ECB reference rates, which are published on business days and are not real-time.
+      </p>
+    </section>
+  );
+}
+
 export default function ExchangeRates() {
   const [rates, setRates] = useState<RatePoint[]>([]);
   const [loading, setLoading] = useState(true);
@@ -715,6 +777,8 @@ export default function ExchangeRates() {
           )}
         </div>
       </section>
+
+      <LiveMarketChart />
 
       <section className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
         <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
