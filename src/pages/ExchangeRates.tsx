@@ -640,9 +640,6 @@ function LiveMarketChart({
           </div>
           {isIntraday && (
             <>
-              <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
-                Auto-refreshes every 5 min
-              </span>
               <button type="button" onClick={() => setRefreshVersion(version => version + 1)} disabled={liveLoading} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
                 <RefreshCw className={`h-4 w-4 ${liveLoading ? 'animate-spin' : ''}`} />
                 Refresh
