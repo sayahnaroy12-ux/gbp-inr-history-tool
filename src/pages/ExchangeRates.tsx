@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowDownRight, ArrowUpRight, RefreshCw, TrendingUp } from 'lucide-react';
 import {
   Area,
@@ -109,6 +109,11 @@ const RANGE_DAYS: Record<RangeKey, number> = {
   '5Y': 365 * 5,
 };
 
+const LIVE_HISTORY_WINDOW_MS = 6 * 60 * 60 * 1000;
+const LIVE_HISTORY_RETENTION_MS = RANGE_DAYS['1W'] * 24 * 60 * 60 * 1000;
+const LIVE_HISTORY_RETENTION_BUFFER_MS = 5 * 60 * 1000;
+const MAX_LIVE_CHART_POINTS = 800;
+
 const numberFormat = new Intl.NumberFormat('en-IN', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
@@ -129,6 +134,16 @@ const formatUtcTimestamp = (date: Date) => new Intl.DateTimeFormat('en-GB', {
   hour: '2-digit',
   minute: '2-digit',
   timeZone: 'UTC',
+  timeZoneName: 'short',
+}).format(date);
+
+const formatLiveTimestamp = (date: Date) => new Intl.DateTimeFormat('en-IN', {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  timeZone: 'Asia/Kolkata',
   timeZoneName: 'short',
 }).format(date);
 
@@ -240,6 +255,46 @@ function getRangeStart(range: RangeKey, latestDate: string): string | null {
 function isIntradayRange(range: RangeKey): boolean {
   return range === '1D' || range === '2D' || range === '3D' || range === '4D'
     || range === '5D' || range === '1W';
+}
+
+function mergeLivePoints(current: LiveRatePoint[], incoming: LiveRatePoint[]): LiveRatePoint[] {
+  const cutoff = Date.now() - LIVE_HISTORY_RETENTION_MS;
+  const byTimestamp = new Map(
+    current.filter(point => point.timestamp >= cutoff).map(point => [point.timestamp, point]),
+  );
+  incoming.forEach(point => {
+    if (point.timestamp >= cutoff) byTimestamp.set(point.timestamp, point);
+  });
+  return Array.from(byTimestamp.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-Math.ceil(LIVE_HISTORY_RETENTION_MS / 60_000));
+}
+
+function downsampleLivePoints(points: LiveRatePoint[]): LiveRatePoint[] {
+  if (points.length <= MAX_LIVE_CHART_POINTS) return points;
+
+  const bucketCount = Math.floor((MAX_LIVE_CHART_POINTS - 2) / 2);
+  const bucketSize = Math.ceil((points.length - 2) / bucketCount);
+  const sampled = [points[0]];
+
+  for (let start = 1; start < points.length - 1; start += bucketSize) {
+    const end = Math.min(start + bucketSize, points.length - 1);
+    let minimum = points[start];
+    let maximum = points[start];
+    for (let index = start + 1; index < end; index += 1) {
+      if (points[index].rate < minimum.rate) minimum = points[index];
+      if (points[index].rate > maximum.rate) maximum = points[index];
+    }
+    if (minimum.timestamp <= maximum.timestamp) {
+      sampled.push(minimum);
+      if (maximum.timestamp !== minimum.timestamp) sampled.push(maximum);
+    } else {
+      sampled.push(maximum, minimum);
+    }
+  }
+  const lastPoint = points.at(-1);
+  if (lastPoint) sampled.push(lastPoint);
+  return sampled;
 }
 
 function getMonthlyAverages(points: RatePoint[]) {
@@ -506,20 +561,32 @@ function LiveMarketChart({
 }) {
   const [livePoints, setLivePoints] = useState<LiveRatePoint[]>([]);
   const [liveLoading, setLiveLoading] = useState(true);
-  const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveHistoryError, setLiveHistoryError] = useState<string | null>(null);
+  const [liveQuoteError, setLiveQuoteError] = useState<string | null>(null);
   const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [historyProgress, setHistoryProgress] = useState<{ completed: number; total: number } | null>(null);
+  const loadedHistoryDays = useRef(0);
   const latestAvailableDaily = rates.at(-1);
   const dailyStartDate = latestAvailableDaily ? getRangeStart(range, latestAvailableDaily.date) : null;
   const recentRates = dailyStartDate
     ? rates.filter(({ date }) => date >= dailyStartDate)
     : rates;
+  const intradayFallbackRates = rates.slice(-Math.min(rates.length, Math.max(2, RANGE_DAYS[range])));
+  const rangeStartTimestamp = Date.now() - RANGE_DAYS[range] * 24 * 60 * 60 * 1000;
+  const rangeLivePoints = useMemo(
+    () => livePoints.filter(point => point.timestamp >= rangeStartTimestamp),
+    [livePoints, rangeStartTimestamp],
+  );
+  const chartLivePoints = useMemo(() => downsampleLivePoints(rangeLivePoints), [rangeLivePoints]);
   const latestDaily = rates.at(-1);
   const previousDaily = rates.at(-2);
-  const latestLive = livePoints.at(-1);
-  const previousLive = livePoints.at(-2);
+  const latestLive = rangeLivePoints.at(-1);
+  const previousLive = rangeLivePoints.at(-2);
   const dailyChange = latestDaily && previousDaily ? latestDaily.rate - previousDaily.rate : null;
   const isIntraday = isIntradayRange(range);
+  const liveError = liveHistoryError ?? liveQuoteError;
+  const hasLiveChart = chartLivePoints.length > 1;
   useEffect(() => {
     if (!isIntradayRange(range)) {
       setLiveLoading(false);
@@ -543,68 +610,98 @@ function LiveMarketChart({
           throw new Error(payload.error?.info || 'The live rate feed returned an invalid GBP/INR quote.');
         }
         const point = { timestamp: payload.timestamp * 1000, rate };
-        setLivePoints(current => {
-          const last = current.at(-1);
-          if (last?.timestamp === point.timestamp) return [...current.slice(0, -1), point];
-          if (last && point.timestamp < last.timestamp) return current;
-          return [...current, point].slice(-300);
-        });
+        setLivePoints(current => mergeLivePoints(current, [point]));
         setCheckedAt(new Date());
-        setLiveError(null);
+        setLiveQuoteError(null);
       } catch (loadError) {
         if (controller.signal.aborted) return;
-        setLiveError(loadError instanceof Error ? loadError.message : 'The live GBP/INR quote could not be loaded.');
+        setLiveQuoteError(loadError instanceof Error ? loadError.message : 'The live GBP/INR quote could not be loaded.');
       }
     };
 
     const loadInitialHistory = async () => {
+      if (loadedHistoryDays.current >= RANGE_DAYS[range]) {
+        setLiveLoading(false);
+        setHistoryProgress(null);
+        return;
+      }
+
       setLiveLoading(true);
-      setLivePoints([]);
+      setLiveHistoryError(null);
       try {
         const end = Math.floor((Date.now() - 2 * 60 * 1000) / 60_000) * 60_000;
-        const start = end - RANGE_DAYS[range] * 24 * 60 * 60 * 1000;
-        const params = new URLSearchParams({
-          api_key: apiKey,
-          start_date: new Date(start).toISOString().slice(0, 19),
-          end_date: new Date(end).toISOString().slice(0, 19),
-          accuracy: '1m',
-          base: 'GBP',
-          currencies: 'INR',
-          format: 'json',
-        });
-        const response = await fetch(`https://api.fxratesapi.com/timeseries?${params}`, {
-          signal: controller.signal,
-          cache: 'no-store',
-        });
-        if (!response.ok) {
-          throw new Error(`The live rate history returned HTTP ${response.status}.`);
+        const requestedStart = end - RANGE_DAYS[range] * 24 * 60 * 60 * 1000;
+        const oldestSupportedStart = Date.now() - LIVE_HISTORY_RETENTION_MS + LIVE_HISTORY_RETENTION_BUFFER_MS;
+        const start = Math.max(requestedStart, oldestSupportedStart);
+        const totalChunks = Math.ceil((end - start) / LIVE_HISTORY_WINDOW_MS);
+        let completedChunks = 0;
+        let chunkEnd = end;
+        let fetchedCount = 0;
+        setHistoryProgress({ completed: completedChunks, total: totalChunks });
+        while (chunkEnd > start) {
+          if (controller.signal.aborted) return;
+          const chunkStart = Math.max(start, chunkEnd - LIVE_HISTORY_WINDOW_MS);
+          const params = new URLSearchParams({
+            api_key: apiKey,
+            start_date: new Date(chunkStart).toISOString().slice(0, 19),
+            end_date: new Date(chunkEnd).toISOString().slice(0, 19),
+            accuracy: '1m',
+            base: 'GBP',
+            currencies: 'INR',
+            format: 'json',
+          });
+          const response = await fetch(`https://api.fxratesapi.com/timeseries?${params}`, {
+            signal: controller.signal,
+            cache: 'no-store',
+          });
+          if (!response.ok) {
+            const body = await response.text();
+            let detail = '';
+            try {
+              const errorPayload = JSON.parse(body) as { description?: string; error?: string | { info?: string } };
+              detail = errorPayload.description
+                ?? (typeof errorPayload.error === 'string' ? errorPayload.error : errorPayload.error?.info)
+                ?? '';
+            } catch {
+              detail = '';
+            }
+            throw new Error(`The live rate history returned HTTP ${response.status}${detail ? `: ${detail}` : '.'}`);
+          }
+          const payload = await response.json() as LiveRateHistoryResponse;
+          if (!payload.success || payload.base !== 'GBP' || !payload.rates || typeof payload.rates !== 'object') {
+            throw new Error(payload.error?.info || 'The live rate history returned an invalid response.');
+          }
+          const points = Object.entries(payload.rates)
+            .map(([date, currencies]) => ({ timestamp: Date.parse(date), rate: currencies.INR }))
+            .filter(point => Number.isFinite(point.timestamp) && Number.isFinite(point.rate) && point.rate > 0)
+            .sort((a, b) => a.timestamp - b.timestamp);
+          fetchedCount += points.length;
+          setLivePoints(current => mergeLivePoints(current, points));
+          chunkEnd = chunkStart;
+          completedChunks += 1;
+          setHistoryProgress({ completed: completedChunks, total: totalChunks });
         }
-        const payload = await response.json() as LiveRateHistoryResponse;
-        if (!payload.success || payload.base !== 'GBP' || !payload.rates || typeof payload.rates !== 'object') {
-          throw new Error(payload.error?.info || 'The live rate history returned an invalid response.');
-        }
-        const points = Object.entries(payload.rates)
-          .map(([date, currencies]) => ({ timestamp: Date.parse(date), rate: currencies.INR }))
-          .filter(point => Number.isFinite(point.timestamp) && Number.isFinite(point.rate) && point.rate > 0)
-          .sort((a, b) => a.timestamp - b.timestamp)
-          .slice(-10_080);
-        if (points.length === 0) {
+        if (fetchedCount === 0) {
           throw new Error('No recent GBP/INR market snapshots were returned.');
         }
-        setLivePoints(points);
-        setCheckedAt(new Date());
-        setLiveError(null);
+        loadedHistoryDays.current = Math.max(loadedHistoryDays.current, RANGE_DAYS[range]);
+        setLiveHistoryError(null);
       } catch (loadError) {
         if (controller.signal.aborted) return;
-        setLiveError(loadError instanceof Error ? loadError.message : 'The live GBP/INR chart history could not be loaded.');
+        setLiveHistoryError(loadError instanceof Error ? loadError.message : 'The live GBP/INR chart history could not be loaded.');
       } finally {
-        if (!controller.signal.aborted) setLiveLoading(false);
+        if (!controller.signal.aborted) {
+          setLiveLoading(false);
+          setHistoryProgress(null);
+        }
       }
     };
 
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') void loadLiveRate();
     };
+    setLiveHistoryError(null);
+    void loadLiveRate();
     void loadInitialHistory();
     const intervalId = window.setInterval(refreshWhenVisible, 5 * 60 * 1000);
     document.addEventListener('visibilitychange', refreshWhenVisible);
@@ -661,8 +758,8 @@ function LiveMarketChart({
             </>
           )}
           <span className="text-xs text-slate-500 dark:text-slate-400">
-            {latestLive ? `Provider quote: ${formatUtcTimestamp(new Date(latestLive.timestamp))}` : 'Waiting for a live quote'}
-            {checkedAt ? ` · Checked ${formatUtcTimestamp(checkedAt)}` : ''}
+            {latestLive ? `Provider quote: ${formatLiveTimestamp(new Date(latestLive.timestamp))}` : 'Waiting for a live quote'}
+            {checkedAt ? ` · Checked ${formatLiveTimestamp(checkedAt)}` : ''}
           </span>
         </div>
       ) : (
@@ -676,33 +773,41 @@ function LiveMarketChart({
           </span>
         </div>
       )}
+      {isIntraday && liveLoading && (
+        <p role="status" className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+          Loading 1-minute history{historyProgress ? ` (${historyProgress.completed}/${historyProgress.total} windows)` : ''}. Available points appear as they load.
+        </p>
+      )}
       {isIntraday && liveError && (
         <p role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
-          {liveError} {latestLive ? 'Showing the last successful quote.' : 'The daily reference-rate view is still available.'}
+          {liveError}{' '}
+          {hasLiveChart
+            ? 'Showing available intraday history.'
+            : intradayFallbackRates.length > 0
+              ? 'Showing the most recent published daily reference rates instead.'
+              : 'No rate chart is available right now.'}
         </p>
       )}
       <div className="h-72">
-        {isIntraday ? livePoints.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">
-            {liveLoading ? 'Loading live rate snapshots…' : 'No live rate snapshots yet.'}
-          </div>
-        ) : (
+        {isIntraday && hasLiveChart ? (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={livePoints} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+            <LineChart data={chartLivePoints} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="timestamp"
                 type="number"
                 scale="time"
-                domain={[livePoints[0]?.timestamp ?? 'dataMin', livePoints.at(-1)?.timestamp ?? 'dataMax']}
+                domain={[chartLivePoints[0]?.timestamp ?? 'dataMin', chartLivePoints.at(-1)?.timestamp ?? 'dataMax']}
                 axisLine={false}
                 tickLine={false}
-                minTickGap={32}
+                minTickGap={48}
                 tick={{ fill: '#94a3b8', fontSize: 11 }}
-                tickFormatter={value => new Intl.DateTimeFormat('en-IN', range === '1D'
-                  ? { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }
-                  : { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' },
-                ).format(new Date(Number(value)))}
+                tickFormatter={value => new Intl.DateTimeFormat('en-IN', {
+                  day: 'numeric',
+                  month: 'short',
+                  hour: '2-digit',
+                  timeZone: 'Asia/Kolkata',
+                }).format(new Date(Number(value)))}
               />
               <YAxis
                 axisLine={false}
@@ -713,24 +818,28 @@ function LiveMarketChart({
                 tickFormatter={value => `₹${Number(value).toFixed(2)}`}
               />
               <Tooltip
-                labelFormatter={value => formatUtcTimestamp(new Date(Number(value)))}
+                labelFormatter={value => formatLiveTimestamp(new Date(Number(value)))}
                 formatter={value => [formatRate(Number(value)), 'Live market snapshot']}
                 contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgb(15 23 42 / 0.1)' }}
               />
-              <Line type="monotone" dataKey="rate" name="Market rate" stroke="#0891b2" strokeWidth={2} dot={livePoints.length < 150} activeDot={{ r: 5 }} />
+              <Line type="monotone" dataKey="rate" name="Market rate" stroke="#0891b2" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
             </LineChart>
           </ResponsiveContainer>
-        ) : loading && rates.length === 0 ? (
+        ) : isIntraday && intradayFallbackRates.length === 0 && (loading || liveLoading) ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Loading daily reference rates while intraday history loads…</div>
+        ) : isIntraday && intradayFallbackRates.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">No intraday snapshots or published daily reference rates are available.</div>
+        ) : !isIntraday && loading && rates.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Loading daily rates…</div>
-        ) : recentRates.length === 0 ? (
+        ) : (isIntraday ? intradayFallbackRates : recentRates).length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Daily rate history is unavailable.</div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={recentRates} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+            <LineChart data={isIntraday ? intradayFallbackRates : recentRates} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="date" axisLine={false} tickLine={false} minTickGap={32} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={value => formatDate(String(value), { day: 'numeric', month: 'short' })} />
               <YAxis axisLine={false} tickLine={false} width={58} domain={['auto', 'auto']} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={value => `₹${Number(value).toFixed(2)}`} />
-              <Tooltip labelFormatter={value => formatDate(String(value))} formatter={value => [formatRate(Number(value)), 'Reference rate']} contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgb(15 23 42 / 0.1)' }} />
+              <Tooltip labelFormatter={value => formatDate(String(value))} formatter={value => [formatRate(Number(value)), 'Published reference rate']} contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgb(15 23 42 / 0.1)' }} />
               <Line type="monotone" dataKey="rate" name="Rate" stroke="#2563eb" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 5 }} />
             </LineChart>
           </ResponsiveContainer>
@@ -738,7 +847,7 @@ function LiveMarketChart({
       </div>
       <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
         {isIntraday
-          ? <>Source: <a href="https://fxratesapi.com/" target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline underline-offset-2 dark:text-blue-400">FXRatesAPI</a>, requested at 1-minute resolution for the selected {RANGE_DAYS[range]}-day window; this page refreshes the latest quote every 5 minutes while visible. Timestamps are from the provider. These are indicative aggregated FX rates, not exchange transaction prints, a guaranteed live executable quote, or tick-by-tick trades. </>
+          ? <>Intraday source: <a href="https://fxratesapi.com/" target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline underline-offset-2 dark:text-blue-400">FXRatesAPI</a>, requested at 1-minute resolution for the selected {RANGE_DAYS[range]}-day window in windows of up to six hours (the provider's history limit). The latest quote is checked every 5 minutes while this page is visible. Displayed times are India Standard Time. Dense charts are reduced to a min/max-preserving sample for responsiveness; snapshots are transient and are not saved. These are indicative aggregated FX rates, not exchange transaction prints, guaranteed executable quotes, or tick-by-tick trades. {!hasLiveChart && intradayFallbackRates.length > 0 && <>The chart currently shows the most recent published daily rates from <a href="https://www.frankfurter.dev/" target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline underline-offset-2 dark:text-blue-400">Frankfurter / ECB</a> instead.</>}</>
           : <>Source: <a href="https://www.frankfurter.dev/" target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline underline-offset-2 dark:text-blue-400">Frankfurter / ECB</a>. Each point is the actual published daily reference observation in the selected {RANGE_OPTIONS.find(option => option.key === range)?.label} range; no monthly averaging or interpolation is applied. These business-day reference rates are not intraday prices. {ratesUpdatedAt ? `Dataset synchronized ${new Date(ratesUpdatedAt).toLocaleString()}.` : ''}</>}
       </p>
     </section>
