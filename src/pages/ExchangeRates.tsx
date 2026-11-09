@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Activity, ArrowDownRight, ArrowUpRight, RefreshCw, TrendingUp } from 'lucide-react';
 import {
   Area,
@@ -452,65 +452,77 @@ function DailyChange({ change, percent }: { change: number; percent: number }) {
   );
 }
 
-function LiveMarketChart() {
-  const widgetRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const widget = widgetRef.current;
-    if (!widget) return;
-
-    const script = document.createElement('script');
-    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
-    script.async = true;
-    script.text = JSON.stringify({
-      allow_symbol_change: false,
-      autosize: true,
-      calendar: false,
-      details: false,
-      hotlist: false,
-      hide_side_toolbar: true,
-      interval: '5',
-      locale: 'en',
-      save_image: false,
-      style: '2',
-      studies: [],
-      support_host: 'https://www.tradingview.com',
-      symbol: 'FX_IDC:GBPINR',
-      theme: 'light',
-      timezone: 'Asia/Kolkata',
-      withdateranges: true,
-    });
-    widget.appendChild(script);
-
-    return () => {
-      widget.replaceChildren();
-    };
-  }, []);
-
+function LiveMarketChart({ rates, loading }: { rates: RatePoint[]; loading: boolean }) {
+  const recentRates = rates.slice(-30);
+  const latest = recentRates.at(-1);
+  const previous = recentRates.at(-2);
+  const dailyChange = latest && previous ? latest.rate - previous.rate : null;
   return (
-    <section aria-label="Live GBP/INR market chart" className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
-      <div className="mb-4">
-        <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Live market rate &amp; intraday chart</h2>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Current GBP/INR market feed with a 5-minute chart. Quote availability and update timing depend on the data provider; prices may be delayed or indicative, not executable.
-        </p>
-      </div>
-      <div className="h-[460px] overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700">
-        <div className="tradingview-widget-container h-full w-full" ref={widgetRef}>
-          <div className="tradingview-widget-container__widget h-full w-full" />
+    <section aria-label="Daily GBP/INR rate tracker" className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Daily GBP/INR rate tracker</h2>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            Each point is a published daily reference rate. Weekends and holidays are omitted when no rate is published.
+          </p>
         </div>
-      </div>
-      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-        Intraday data by{' '}
         <a
           href="https://www.tradingview.com/symbols/GBPINR/"
           target="_blank"
           rel="noreferrer"
-          className="font-medium text-blue-600 underline underline-offset-2 hover:text-blue-700 dark:text-blue-400"
+          className="inline-flex shrink-0 items-center justify-center rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-slate-50 dark:border-slate-700 dark:text-blue-300 dark:hover:bg-slate-800"
         >
-          TradingView (FX_IDC:GBPINR)
+          Open intraday market chart
         </a>
-        . The daily history, year timelines, and forecasts below continue to use ECB reference rates, which are published on business days and are not real-time.
+      </div>
+      <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
+          {latest ? formatRate(latest.rate) : loading ? 'Loading…' : '—'}
+        </span>
+        {latest && dailyChange !== null && previous && (
+          <DailyChange change={dailyChange} percent={(dailyChange / previous.rate) * 100} />
+        )}
+        <span className="text-xs text-slate-500 dark:text-slate-400">
+          {latest ? `Latest published rate: ${formatDate(latest.date)}` : 'No daily rate available'}
+        </span>
+      </div>
+      <div className="h-72">
+        {loading && rates.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Loading daily rates…</div>
+        ) : recentRates.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Daily rate history is unavailable.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={recentRates} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+              <XAxis
+                dataKey="date"
+                axisLine={false}
+                tickLine={false}
+                minTickGap={32}
+                tick={{ fill: '#94a3b8', fontSize: 11 }}
+                tickFormatter={value => formatDate(String(value), { day: 'numeric', month: 'short' })}
+              />
+              <YAxis
+                axisLine={false}
+                tickLine={false}
+                width={58}
+                domain={['auto', 'auto']}
+                tick={{ fill: '#94a3b8', fontSize: 11 }}
+                tickFormatter={value => `₹${Number(value).toFixed(2)}`}
+              />
+              <Tooltip
+                labelFormatter={value => formatDate(String(value))}
+                formatter={value => [formatRate(Number(value)), 'Reference rate']}
+                contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgb(15 23 42 / 0.1)' }}
+              />
+              <Line type="monotone" dataKey="rate" name="Rate" stroke="#2563eb" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 5 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+        Daily data from Frankfurter’s ECB reference-rate feed. It updates when the source publishes a new business-day rate; this chart is not intraday or a live trading quote. For an intraday market chart, use the external TradingView link above.
       </p>
     </section>
   );
@@ -780,7 +792,7 @@ export default function ExchangeRates() {
         </div>
       </section>
 
-      <LiveMarketChart />
+      <LiveMarketChart rates={rates} loading={loading} />
 
       <section className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
         <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
