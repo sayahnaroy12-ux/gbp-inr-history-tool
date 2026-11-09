@@ -17,6 +17,26 @@ type RatePoint = {
   rate: number;
 };
 
+type LiveRatePoint = {
+  timestamp: number;
+  rate: number;
+};
+
+type LiveRateResponse = {
+  success: boolean;
+  base: string;
+  timestamp: number;
+  rates: Record<string, number>;
+  error?: { info?: string };
+};
+
+type LiveRateHistoryResponse = {
+  success: boolean;
+  base: string;
+  rates: Record<string, Record<string, number>>;
+  error?: { info?: string };
+};
+
 type RiskPoint = {
   date: string;
   value: number;
@@ -453,55 +473,191 @@ function DailyChange({ change, percent }: { change: number; percent: number }) {
 }
 
 function LiveMarketChart({ rates, loading }: { rates: RatePoint[]; loading: boolean }) {
+  const [chartMode, setChartMode] = useState<'live' | 'daily'>('live');
+  const [livePoints, setLivePoints] = useState<LiveRatePoint[]>([]);
+  const [liveLoading, setLiveLoading] = useState(true);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [checkedAt, setCheckedAt] = useState<Date | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const recentRates = rates.slice(-30);
-  const latest = recentRates.at(-1);
-  const previous = recentRates.at(-2);
-  const dailyChange = latest && previous ? latest.rate - previous.rate : null;
+  const latestDaily = recentRates.at(-1);
+  const previousDaily = recentRates.at(-2);
+  const latestLive = livePoints.at(-1);
+  const previousLive = livePoints.at(-2);
+  const dailyChange = latestDaily && previousDaily ? latestDaily.rate - previousDaily.rate : null;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const apiKey = 'fxr_demo_lmasdg193';
+    const loadLiveRate = async () => {
+      try {
+        const response = await fetch(
+          `https://api.fxratesapi.com/latest?api_key=${apiKey}&base=GBP&currencies=INR&resolution=1m&amount=1&places=6&format=json`,
+          { signal: controller.signal, cache: 'no-store' },
+        );
+        if (!response.ok) {
+          throw new Error(`The live rate feed returned HTTP ${response.status}.`);
+        }
+        const payload = await response.json() as LiveRateResponse;
+        const rate = payload.rates?.INR;
+        if (!payload.success || payload.base !== 'GBP' || !Number.isFinite(payload.timestamp) || !Number.isFinite(rate) || rate <= 0) {
+          throw new Error(payload.error?.info || 'The live rate feed returned an invalid GBP/INR quote.');
+        }
+        const point = { timestamp: payload.timestamp * 1000, rate };
+        setLivePoints(current => {
+          const last = current.at(-1);
+          if (last?.timestamp === point.timestamp) return [...current.slice(0, -1), point];
+          if (last && point.timestamp < last.timestamp) return current;
+          return [...current, point].slice(-300);
+        });
+        setCheckedAt(new Date());
+        setLiveError(null);
+      } catch (loadError) {
+        if (controller.signal.aborted) return;
+        setLiveError(loadError instanceof Error ? loadError.message : 'The live GBP/INR quote could not be loaded.');
+      }
+    };
+
+    const loadInitialHistory = async () => {
+      setLiveLoading(true);
+      try {
+        const end = Math.floor((Date.now() - 2 * 60 * 1000) / 60_000) * 60_000;
+        const start = end - 60 * 60 * 1000;
+        const params = new URLSearchParams({
+          api_key: apiKey,
+          start_date: new Date(start).toISOString().slice(0, 19),
+          end_date: new Date(end).toISOString().slice(0, 19),
+          accuracy: '1m',
+          base: 'GBP',
+          currencies: 'INR',
+          format: 'json',
+        });
+        const response = await fetch(`https://api.fxratesapi.com/timeseries?${params}`, {
+          signal: controller.signal,
+          cache: 'no-store',
+        });
+        if (!response.ok) {
+          throw new Error(`The live rate history returned HTTP ${response.status}.`);
+        }
+        const payload = await response.json() as LiveRateHistoryResponse;
+        if (!payload.success || payload.base !== 'GBP' || !payload.rates || typeof payload.rates !== 'object') {
+          throw new Error(payload.error?.info || 'The live rate history returned an invalid response.');
+        }
+        const points = Object.entries(payload.rates)
+          .map(([date, currencies]) => ({ timestamp: Date.parse(date), rate: currencies.INR }))
+          .filter(point => Number.isFinite(point.timestamp) && Number.isFinite(point.rate) && point.rate > 0)
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .slice(-300);
+        if (points.length === 0) {
+          throw new Error('No recent GBP/INR market snapshots were returned.');
+        }
+        setLivePoints(points);
+        setCheckedAt(new Date());
+        setLiveError(null);
+      } catch (loadError) {
+        if (controller.signal.aborted) return;
+        setLiveError(loadError instanceof Error ? loadError.message : 'The live GBP/INR chart history could not be loaded.');
+      } finally {
+        if (!controller.signal.aborted) setLiveLoading(false);
+      }
+    };
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void loadLiveRate();
+    };
+    void loadInitialHistory();
+    const intervalId = window.setInterval(refreshWhenVisible, 5 * 60 * 1000);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      controller.abort();
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [refreshVersion]);
+
   return (
-    <section aria-label="Daily GBP/INR rate tracker" className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+    <section aria-label="GBP/INR live and daily rate tracker" className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Daily GBP/INR rate tracker</h2>
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-white">GBP/INR rate tracker</h2>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Each point is a published daily reference rate. Weekends and holidays are omitted when no rate is published.
+            Track incoming market-rate snapshots or review the published daily reference rates.
           </p>
         </div>
-        <a
-          href="https://www.tradingview.com/symbols/GBPINR/"
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex shrink-0 items-center justify-center rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-slate-50 dark:border-slate-700 dark:text-blue-300 dark:hover:bg-slate-800"
-        >
-          Open intraday market chart
-        </a>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800" aria-label="Tracker chart mode">
+            <button type="button" onClick={() => setChartMode('live')} aria-pressed={chartMode === 'live'} className={`rounded-md px-3 py-1.5 text-xs font-semibold ${chartMode === 'live' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
+              Live
+            </button>
+            <button type="button" onClick={() => setChartMode('daily')} aria-pressed={chartMode === 'daily'} className={`rounded-md px-3 py-1.5 text-xs font-semibold ${chartMode === 'daily' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
+              30D daily
+            </button>
+          </div>
+          {chartMode === 'live' && (
+            <>
+              <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+                Auto-refreshes every 5 min
+              </span>
+              <button type="button" onClick={() => setRefreshVersion(version => version + 1)} disabled={liveLoading} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
+                <RefreshCw className={`h-4 w-4 ${liveLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </>
+          )}
+        </div>
       </div>
-      <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-          {latest ? formatRate(latest.rate) : loading ? 'Loading…' : '—'}
-        </span>
-        {latest && dailyChange !== null && previous && (
-          <DailyChange change={dailyChange} percent={(dailyChange / previous.rate) * 100} />
-        )}
-        <span className="text-xs text-slate-500 dark:text-slate-400">
-          {latest ? `Latest published rate: ${formatDate(latest.date)}` : 'No daily rate available'}
-        </span>
-      </div>
+      {chartMode === 'live' ? (
+        <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <span className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">{latestLive ? formatRate(latestLive.rate) : liveLoading ? 'Loading…' : '—'}</span>
+          {latestLive && previousLive && (
+            <>
+              <DailyChange
+                change={latestLive.rate - previousLive.rate}
+                percent={((latestLive.rate - previousLive.rate) / previousLive.rate) * 100}
+              />
+              <span className="text-xs text-slate-500 dark:text-slate-400">vs previous captured snapshot</span>
+            </>
+          )}
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            {latestLive ? `Provider quote: ${formatUtcTimestamp(new Date(latestLive.timestamp))}` : 'Waiting for a live quote'}
+            {checkedAt ? ` · Checked ${formatUtcTimestamp(checkedAt)}` : ''}
+          </span>
+        </div>
+      ) : (
+        <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <span className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">{latestDaily ? formatRate(latestDaily.rate) : loading ? 'Loading…' : '—'}</span>
+          {latestDaily && dailyChange !== null && previousDaily && (
+            <DailyChange change={dailyChange} percent={(dailyChange / previousDaily.rate) * 100} />
+          )}
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            {latestDaily ? `Latest published rate: ${formatDate(latestDaily.date)}` : 'No daily rate available'}
+          </span>
+        </div>
+      )}
+      {chartMode === 'live' && liveError && (
+        <p role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
+          {liveError} {latestLive ? 'Showing the last successful quote.' : 'The daily reference-rate view is still available.'}
+        </p>
+      )}
       <div className="h-72">
-        {loading && rates.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Loading daily rates…</div>
-        ) : recentRates.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Daily rate history is unavailable.</div>
+        {chartMode === 'live' ? livePoints.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">
+            {liveLoading ? 'Loading live rate snapshots…' : 'No live rate snapshots yet.'}
+          </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={recentRates} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+            <LineChart data={livePoints} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
               <XAxis
-                dataKey="date"
+                dataKey="timestamp"
+                type="number"
+                scale="time"
+                domain={['dataMin', 'dataMax']}
                 axisLine={false}
                 tickLine={false}
                 minTickGap={32}
                 tick={{ fill: '#94a3b8', fontSize: 11 }}
-                tickFormatter={value => formatDate(String(value), { day: 'numeric', month: 'short' })}
+                tickFormatter={value => new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(new Date(Number(value)))}
               />
               <YAxis
                 axisLine={false}
@@ -512,17 +668,34 @@ function LiveMarketChart({ rates, loading }: { rates: RatePoint[]; loading: bool
                 tickFormatter={value => `₹${Number(value).toFixed(2)}`}
               />
               <Tooltip
-                labelFormatter={value => formatDate(String(value))}
-                formatter={value => [formatRate(Number(value)), 'Reference rate']}
+                labelFormatter={value => formatUtcTimestamp(new Date(Number(value)))}
+                formatter={value => [formatRate(Number(value)), 'Live market snapshot']}
                 contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgb(15 23 42 / 0.1)' }}
               />
+              <Line type="monotone" dataKey="rate" name="Market rate" stroke="#0891b2" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 5 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : loading && rates.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Loading daily rates…</div>
+        ) : recentRates.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500 dark:text-slate-400">Daily rate history is unavailable.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={recentRates} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="date" axisLine={false} tickLine={false} minTickGap={32} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={value => formatDate(String(value), { day: 'numeric', month: 'short' })} />
+              <YAxis axisLine={false} tickLine={false} width={58} domain={['auto', 'auto']} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={value => `₹${Number(value).toFixed(2)}`} />
+              <Tooltip labelFormatter={value => formatDate(String(value))} formatter={value => [formatRate(Number(value)), 'Reference rate']} contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgb(15 23 42 / 0.1)' }} />
               <Line type="monotone" dataKey="rate" name="Rate" stroke="#2563eb" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 5 }} />
             </LineChart>
           </ResponsiveContainer>
         )}
       </div>
       <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-        Daily data from Frankfurter’s ECB reference-rate feed. It updates when the source publishes a new business-day rate; this chart is not intraday or a live trading quote. For an intraday market chart, use the external TradingView link above.
+        {chartMode === 'live'
+          ? <>Live GBP/INR snapshots from <a href="https://fxratesapi.com/" target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline underline-offset-2 dark:text-blue-400">FXRatesAPI</a> (provider resolution: 1 minute); this page checks for updates every 5 minutes while visible. Points are collected only while this page is open and are not persisted. Rates are indicative, may be delayed, and are not executable trade quotes. </>
+          : 'Daily data from Frankfurter’s ECB reference-rate feed. It updates when the source publishes a new business-day rate; weekends and holidays are omitted. These are reference rates, not live trading quotes. '}
+        Daily reference history remains available in the other chart sections.
       </p>
     </section>
   );
