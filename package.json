@@ -8,7 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "sync:rates": "node scripts/sync-rates.mjs",
+    "start:api": "node server/index.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

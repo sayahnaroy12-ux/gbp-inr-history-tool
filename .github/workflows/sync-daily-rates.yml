@@ -1,0 +1,68 @@
+name: Sync daily GBP/INR rates
+
+on:
+  schedule:
+    - cron: '30 17 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Refresh SQLite database and static snapshot
+        run: npm run sync:rates
+
+      - name: Build site with refreshed rates
+        run: npm run build
+
+      - name: Support client-side routes on GitHub Pages
+        run: cp dist/index.html dist/404.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Commit refreshed rate data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/gbp-inr.sqlite public/data/daily-rates.json
+          if git diff --cached --quiet; then
+            echo "No rate data changes to commit."
+          else
+            git commit -m "Update daily GBP/INR reference rates"
+            git push
+          fi
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: sync
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
