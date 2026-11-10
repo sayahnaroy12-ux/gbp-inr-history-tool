@@ -2,8 +2,8 @@
   "amount": 1,
   "base": "GBP",
   "start_date": "2000-01-13",
-  "end_date": "2026-11-09",
-  "updated_at": "2026-11-10T00:47:19.509Z",
+  "end_date": "2026-11-10",
+  "updated_at": "2026-11-10T22:27:00.349Z",
   "source": "Frankfurter / ECB daily reference rates",
   "rates": {
     "2000-01-13": {
@@ -20600,6 +20600,9 @@
     },
     "2026-11-09": {
       "INR": 126.02
+    },
+    "2026-11-10": {
+      "INR": 126.08
     }
   }
 }
