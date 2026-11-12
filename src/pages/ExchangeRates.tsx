@@ -858,9 +858,10 @@ export default function ExchangeRates() {
   const [rates, setRates] = useState<RatePoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [range, setRange] = useState<RangeKey>('1Y');
+  const [range, setRange] = useState<RangeKey>('1D');
   const [ratesUpdatedAt, setRatesUpdatedAt] = useState<string | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [dailyRefreshError, setDailyRefreshError] = useState<string | null>(null);
   const [selectedForecastMonth, setSelectedForecastMonth] = useState('');
   const [expandedYear, setExpandedYear] = useState<string | null | undefined>(undefined);
   const [riskPoints, setRiskPoints] = useState<RiskPoint[]>([]);
@@ -879,6 +880,7 @@ export default function ExchangeRates() {
     const loadRates = async () => {
       setLoading(true);
       setError(null);
+      setDailyRefreshError(null);
       try {
         const apiBase = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, '');
         const dataUrl = `${import.meta.env.BASE_URL}data/daily-rates.json`;
@@ -886,12 +888,14 @@ export default function ExchangeRates() {
           ? [`${apiBase}/api/rates`, dataUrl, 'https://api.frankfurter.dev/v1/2000-01-01..?from=GBP&to=INR']
           : [dataUrl, 'https://api.frankfurter.dev/v1/2000-01-01..?from=GBP&to=INR'];
         let payload: FrankfurterResponse | null = null;
+        let loadedFromUrl = '';
         let lastError: Error | null = null;
         for (const url of sourceUrls) {
           try {
             const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
             if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}.`);
             payload = await response.json() as FrankfurterResponse;
+            loadedFromUrl = url;
             break;
           } catch (sourceError) {
             if (controller.signal.aborted) return;
@@ -899,8 +903,32 @@ export default function ExchangeRates() {
           }
         }
         if (!payload) throw lastError ?? new Error('No rate data source was available.');
-        setRates(parseRates(payload));
+        const snapshotRates = parseRates(payload);
+        setRates(snapshotRates);
         setRatesUpdatedAt(payload.updated_at ?? null);
+        if (loadedFromUrl === dataUrl && snapshotRates.length > 0) {
+          try {
+            const latestDate = snapshotRates.at(-1)!.date;
+            const refreshUrl = `https://api.frankfurter.dev/v1/${latestDate}..?from=GBP&to=INR`;
+            const response = await fetch(refreshUrl, { signal: controller.signal, cache: 'no-store' });
+            if (!response.ok) {
+              throw new Error(`The latest published rates returned HTTP ${response.status}.`);
+            }
+            const refreshedRates = parseRates(await response.json() as FrankfurterResponse);
+            if (!controller.signal.aborted) {
+              const ratesByDate = new Map(snapshotRates.map(point => [point.date, point]));
+              refreshedRates.forEach(point => ratesByDate.set(point.date, point));
+              setRates(Array.from(ratesByDate.values()).sort((a, b) => a.date.localeCompare(b.date)));
+            }
+          } catch (refreshError) {
+            if (controller.signal.aborted) return;
+            setDailyRefreshError(
+              refreshError instanceof Error
+                ? refreshError.message
+                : 'The latest published daily rates could not be refreshed.',
+            );
+          }
+        }
       } catch (loadError) {
         if (controller.signal.aborted) return;
         setError(loadError instanceof Error ? loadError.message : 'Rate history could not be loaded.');
@@ -1067,6 +1095,12 @@ export default function ExchangeRates() {
             Try again
           </button>
         </div>
+      )}
+
+      {dailyRefreshError && (
+        <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
+          Could not check for a newer published daily rate. Showing the saved rate history instead. {dailyRefreshError}
+        </p>
       )}
 
       <section aria-label="Latest rate summary" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
